@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Smart Stampede Preventor</title>
+
+<!-- TensorFlow.js & Coco-SSD model -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.8.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+
+<style>
+  :root{
+    --accent:#0ea5a0;
+    --danger:#ef4444;
+    --bg:#0f172a;
+    --card:#0b1220;
+    --muted:#9ca3af;
+  }
+  html,body{height:100%;margin:0;background:linear-gradient(180deg,#071030,#071826 60%);font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:#e6eef6}
+  .container{max-width:1200px;margin:18px auto;padding:18px;display:grid;grid-template-columns: 1fr 360px;gap:18px}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:12px;padding:12px;box-shadow: 0 6px 18px rgba(2,6,23,0.6);}
+  header{display:flex;gap:12px;align-items:center;margin-bottom:8px}
+  h1{font-size:18px;margin:0}
+  .video-wrap{position:relative;border-radius:10px;overflow:hidden;background:#000;height:540px}
+  video{width:100%;height:100%;object-fit:cover;display:block}
+  canvas{position:absolute;left:0;top:0;pointer-events:none}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  button{background:var(--accent);color:#012;border:none;padding:8px 10px;border-radius:8px;cursor:pointer;font-weight:600}
+  button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+  .right-panel{display:flex;flex-direction:column;gap:12px}
+  .sensor-list{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .sensor{background:rgba(255,255,255,0.02);padding:10px;border-radius:8px;font-size:14px}
+  .big{font-size:22px;font-weight:700}
+  .status{display:flex;gap:8px;align-items:center}
+  .dot{width:10px;height:10px;border-radius:50%}
+  .dot.ok{background:#10b981}
+  .dot.warn{background:#f59e0b}
+  .dot.fail{background:var(--danger)}
+  .alarm{padding:12px;border-radius:10px;text-align:center;font-weight:700}
+  .alarm.on{background:linear-gradient(90deg,#ff5757,#ffb0b0);color:#220005}
+  .config{padding:8px;background:rgba(0,0,0,0.12);border-radius:8px}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  input[type=number],select,input[type=text]{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+  .footer{font-size:12px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+
+<body>
+  <div class="container">
+    <div>
+      <div class="card">
+        <header>
+          <div>
+            <h1>Smart Stampede Preventor</h1>
+            <div style="font-size:12px;color:var(--muted)">Webcam detection + sensor dashboard</div>
+          </div>
+        </header>
+
+        <div class="video-wrap" id="videoWrap">
+          <video id="video" autoplay muted playsinline></video>
+          <canvas id="overlay"></canvas>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div class="controls">
+            <button id="startCamBtn">Start Camera</button>
+            <button id="calibrateBtn" class="ghost">Calibrate 1m×1m</button>
+            <button id="startDetectBtn" class="ghost">Start Detection</button>
+            <button id="stopDetectBtn" class="ghost">Stop</button>
+            <button id="simulateBtn" class="ghost">Toggle Simulate Sensors</button>
+          </div>
+
+          <div style="text-align:right">
+            <div style="font-size:12px;color:var(--muted)">People threshold / cell</div>
+            <input id="threshold" type="number" min="1" max="50" value="4" style="width:80px" />
+          </div>
+        </div>
+
+        <div style="margin-top:12px;display:flex;gap:12px;align-items:center">
+          <div class="config" style="flex:1">
+            <label>Pixels per meter (auto after calibration)</label>
+            <input type="number" id="ppm" placeholder="px / meter" />
+          </div>
+
+          <div class="config" style="width:200px">
+            <label>Grid rows/cols (auto from calibration)</label>
+            <input type="number" id="gridSize" value="6" />
+          </div>
+        </div>
+
+        <div class="footer">
+          Note: Calibrate by drawing a rectangle that equals exactly 1 meter in the scene. Detection uses COCO-SSD model for person boxes.
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <h3 style="margin:0 0 8px 0">Events & Logs</h3>
+        <div id="logs" style="height:140px;overflow:auto;background:#020b14;padding:8px;border-radius:8px"></div>
+      </div>
+    </div>
+
+    <aside class="right-panel">
+      <div class="card">
+        <h3 style="margin:0 0 8px 0">Live Sensors</h3>
+        <div class="sensor-list">
+          <div class="sensor"><div style="font-size:12px;color:var(--muted)">Temperature</div><div id="temp" class="big">-- °C</div></div>
+          <div class="sensor"><div style="font-size:12px;color:var(--muted)">Humidity</div><div id="humi" class="big">-- %</div></div>
+          <div class="sensor"><div style="font-size:12px;color:var(--muted)">CO₂ </div><div id="co2" class="big">--</div></div>
+          <div class="sensor"><div style="font-size:12px;color:var(--muted)">People (total)</div><div id="peopleTotal" class="big">0</div></div>
+        </div>
+
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button id="openValvesBtn">Release Oxygen Valves (4x)</button>
+          <button id="resetAlarmBtn" class="ghost">Reset Alarm</button>
+        </div>
+
+        <div style="margin-top:10px">
+          <div id="alarmBox" class="alarm">System normal</div>
+        </div>
+
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 8px 0">Configuration & Backend</h3>
+        <div class="config">
+          <label>Backend sensor endpoint (GET)</label>
+          <input id="sensorEndpoint" type="text" value="http://localhost:5000/sensors" />
+          <label style="margin-top:8px">Backend control endpoint (POST)</label>
+          <input id="controlEndpoint" type="text" value="http://localhost:5000/control" />
+          <label style="margin-top:8px">CircuitDigest SMS endpoint</label>
+          <input id="smsEndpoint" type="text" value="https://api.circuitdigest.example/send-sms" />
+          <label style="margin-top:8px">SMS API key</label>
+          <input id="smsKey" type="text" placeholder="API_KEY_HERE" />
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 8px 0">Status</h3>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div class="status"><div class="dot ok" id="camDot"></div><div style="font-size:13px">Camera: <span id="camStatus">stopped</span></div></div>
+          <div class="status"><div class="dot warn" id="modelDot"></div><div style="font-size:13px">AI Model: <span id="modelStatus">not loaded</span></div></div>
+          <div class="status"><div class="dot warn" id="backendDot"></div><div style="font-size:13px">Backend: <span id="backendStatus">unknown</span></div></div>
+        </div>
+      </div>
+
+    </aside>
+  </div>
+
+<script>
+/*
+  Smart Crowd & Stampede Managing System - Frontend app
+  - Person detection: TensorFlow COCO-SSD
+  - Calibrate: pixelsPerMeter via drawing rectangle
+  - Grid of 1m x 1m cells overlayed on video
+  - Sensor data fetched from backend endpoint: expects JSON:
+      {
+        "temp": 36.5,
+        "humi": 78,
+        "co2": 410,
+        "flame": false,
+        "laserTrip": false
+      }
+  - To send SMS, configure CircuitDigest endpoint & key in CONFIG below
+  - To command valves/relays: POST to control endpoint: {action:"open_valves", valves:4}
+*/
+
+const CONFIG = {
+  sendSmsUrl: () => document.getElementById('smsEndpoint').value.trim(),
+  sendSmsKey: () => document.getElementById('smsKey').value.trim(),
+  sensorEndpoint: () => document.getElementById('sensorEndpoint').value.trim(),
+  controlEndpoint: () => document.getElementById('controlEndpoint').value.trim(),
+  alertConditions: {
+    humidityPct: 80,
+    tempDegC: 40,
+    peopleThreshold: () => parseInt(document.getElementById('threshold').value || '4',10),
+    co2Raw: 1000 // raw threshold — adjust after calibration
+  }
+};
+
+let model = null;
+let detecting = false;
+let video = document.getElementById('video');
+let overlay = document.getElementById('overlay');
+let ctx = overlay.getContext('2d');
+const logEl = document.getElementById('logs');
+let pixelsPerMeter = parseFloat(document.getElementById('ppm').value) || null;
+let gridSize = parseInt(document.getElementById('gridSize').value,10) || 6;
+let simulateSensors = false;
+let lastSmsTime = 0;
+const SMS_COOLDOWN_MS = 2 * 60 * 1000; // avoid spam: 2 minutes between SMS
+
+// UI elements
+const camStatus = document.getElementById('camStatus');
+const camDot = document.getElementById('camDot');
+const modelStatus = document.getElementById('modelStatus');
+const modelDot = document.getElementById('modelDot');
+const backendStatus = document.getElementById('backendStatus');
+const backendDot = document.getElementById('backendDot');
+const alarmBox = document.getElementById('alarmBox');
+const peopleTotalEl = document.getElementById('peopleTotal');
+
+function log(msg){
+  const t = new Date().toLocaleTimeString();
+  logEl.innerHTML = `<div style="font-size:13px;color:var(--muted)">[${t}]</div> ${msg}` + logEl.innerHTML;
+}
+
+// Camera management
+document.getElementById('startCamBtn').addEventListener('click', async ()=>{
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720}, audio:false});
+    video.srcObject = stream;
+    await video.play();
+    camStatus.innerText = 'running';
+    camDot.className = 'dot ok';
+    resizeCanvas();
+    log('Camera started.');
+  }catch(e){
+    console.error(e);
+    camStatus.innerText = 'error';
+    camDot.className = 'dot fail';
+    log('Camera error: ' + e.message);
+  }
+});
+
+window.addEventListener('resize', resizeCanvas);
+function resizeCanvas(){
+  overlay.width = video.clientWidth;
+  overlay.height = video.clientHeight;
+  overlay.style.width = video.clientWidth + 'px';
+  overlay.style.height = video.clientHeight + 'px';
+}
+
+// Calibrate: draw rectangle to indicate 1 meter
+let isCalibrating = false;
+let calStart = null;
+document.getElementById('calibrateBtn').addEventListener('click', () => {
+  isCalibrating = !isCalibrating;
+  document.getElementById('calibrateBtn').innerText = isCalibrating ? 'Click & drag 1m rect' : 'Calibrate 1m×1m';
+  if(isCalibrating){
+    overlay.style.pointerEvents = 'auto';
+    overlay.addEventListener('mousedown', calMouseDown);
+  } else {
+    overlay.style.pointerEvents = 'none';
+    overlay.removeEventListener('mousedown', calMouseDown);
+  }
+});
+
+function calMouseDown(e){
+  calStart = getCanvasCoords(e);
+  function up(ev){
+    const end = getCanvasCoords(ev);
+    const w = Math.abs(end.x - calStart.x);
+    const h = Math.abs(end.y - calStart.y);
+    const avg = (w + h)/2;
+    pixelsPerMeter = avg; // assume user drew roughly 1m square -> pixels per meter
+    document.getElementById('ppm').value = Math.round(pixelsPerMeter);
+    gridSize = Math.max(2, Math.floor(overlay.width / pixelsPerMeter));
+    document.getElementById('gridSize').value = gridSize;
+    log('Calibration done. pixelsPerMeter=' + Math.round(pixelsPerMeter) + ', gridSize=' + gridSize);
+    overlay.removeEventListener('mouseup', up);
+    isCalibrating = false;
+    document.getElementById('calibrateBtn').innerText = 'Calibrate 1m×1m';
+    overlay.style.pointerEvents = 'none';
+  }
+  overlay.addEventListener('mouseup', up);
+}
+function getCanvasCoords(e){
+  const rect = overlay.getBoundingClientRect();
+  return {x: e.clientX - rect.left, y: e.clientY - rect.top};
+}
+
+
+// Load model
+async function loadModel(){
+  try{
+    modelStatus.innerText = 'loading...';
+    modelDot.className = 'dot warn';
+    model = await cocoSsd.load({base: 'lite_mobilenet_v2'});
+    modelStatus.innerText = 'ready';
+    modelDot.className = 'dot ok';
+    log('COCO-SSD model loaded.');
+  } catch(e){
+    modelStatus.innerText = 'error';
+    modelDot.className = 'dot fail';
+    console.error(e);
+    log('Model load error: ' + e.message);
+  }
+}
+
+document.getElementById('startDetectBtn').addEventListener('click', async ()=>{
+  if(!video.srcObject){
+    alert('Start camera first.');
+    return;
+  }
+  if(!model) await loadModel();
+  detecting = true;
+  detectLoop();
+});
+
+document.getElementById('stopDetectBtn').addEventListener('click', ()=>{
+  detecting = false;
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  log('Detection stopped.');
+});
+
+// Detection loop
+async function detectLoop(){
+  if(!detecting || !model) return;
+  try{
+    const predictions = await model.detect(video, 8);
+    // filter persons
+    const persons = predictions.filter(p => p.class === 'person' && p.score > 0.5);
+    drawResults(persons);
+    handlePeopleCounting(persons);
+  }catch(e){
+    console.error(e);
+  } finally{
+    requestAnimationFrame(detectLoop);
+  }
+}
+
+function drawResults(persons){
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  ctx.lineWidth = 2;
+  ctx.font = '14px Inter';
+  // grid
+  if(pixelsPerMeter){
+    const cols = Math.max(1, Math.floor(overlay.width / pixelsPerMeter));
+    const rows = Math.max(1, Math.floor(overlay.height / pixelsPerMeter));
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    for(let c=0;c<=cols;c++){
+      const x = c * pixelsPerMeter;
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,overlay.height); ctx.stroke();
+    }
+    for(let r=0;r<=rows;r++){
+      const y = r * pixelsPerMeter;
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(overlay.width,y); ctx.stroke();
+    }
+  }
+
+  // bounding boxes
+  persons.forEach(p=>{
+    const [x,y,w,h] = p.bbox;
+    const scaleX = overlay.width / video.videoWidth;
+    const scaleY = overlay.height / video.videoHeight;
+    const rx = x * scaleX, ry = y * scaleY, rw = w * scaleX, rh = h * scaleY;
+    ctx.strokeStyle = 'rgba(14,165,160,0.95)';
+    ctx.fillStyle = 'rgba(14,165,160,0.15)';
+    ctx.beginPath(); ctx.rect(rx,ry,rw,rh); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#e6eef6';
+    ctx.fillText('person ' + Math.round(p.score*100)+'%', rx+6, ry+16);
+  });
+}
+
+// People counting per cell
+function handlePeopleCounting(persons){
+  peopleTotalEl.innerText = persons.length;
+  // map persons to grid cells by center point
+  if(!pixelsPerMeter){
+    // total-only check
+    if(persons.length > CONFIG.alertConditions.peopleThreshold()){
+      triggerAlarm('People total exceeded threshold: ' + persons.length);
+    }
+    return;
+  }
+  const cols = Math.max(1, Math.floor(overlay.width / pixelsPerMeter));
+  const rows = Math.max(1, Math.floor(overlay.height / pixelsPerMeter));
+  // create empty grid counts
+  const grid = Array(rows).fill(0).map(()=>Array(cols).fill(0));
+  const scaleX = overlay.width / video.videoWidth;
+  const scaleY = overlay.height / video.videoHeight;
+  persons.forEach(p=>{
+    const [x,y,w,h] = p.bbox;
+    const cx = (x + w/2) * scaleX;
+    const cy = (y + h/2) * scaleY;
+    const col = Math.min(cols-1, Math.max(0, Math.floor(cx / pixelsPerMeter)));
+    const row = Math.min(rows-1, Math.max(0, Math.floor(cy / pixelsPerMeter)));
+    grid[row][col] += 1;
+  });
+
+  // overlay counts and check threshold per cell
+  ctx.font = '18px Inter';
+  const thresh = CONFIG.alertConditions.peopleThreshold();
+  let triggered = false;
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const cnt = grid[r][c];
+      if(cnt>0){
+        const x = c * pixelsPerMeter + 6;
+        const y = r * pixelsPerMeter + 22;
+        ctx.fillStyle = cnt > thresh ? 'rgba(255,80,80,0.95)' : 'rgba(14,165,160,0.95)';
+        ctx.fillText(cnt + ' ppl', x, y);
+        if(cnt > thresh){
+          triggered = true;
+        }
+      }
+    }
+  }
+  if(triggered){
+    triggerAlarm('Crowding detected in a 1m² cell > ' + thresh + ' ppl');
+  }
+}
+
+// Alarm logic and SMS send
+function triggerAlarm(reason){
+  const now = Date.now();
+  alarmBox.className = 'alarm on';
+  alarmBox.innerText = 'ALARM: ' + reason;
+  playAlarmSound();
+  log('ALARM triggered: ' + reason);
+  if(now - lastSmsTime > SMS_COOLDOWN_MS){
+    sendSMS('ALARM: ' + reason + ' — check area immediately.');
+    lastSmsTime = now;
+  } else {
+    log('SMS suppressed (cooldown).');
+  }
+}
+
+document.getElementById('resetAlarmBtn').addEventListener('click', ()=>{
+  alarmBox.className = 'alarm';
+  alarmBox.innerText = 'System normal';
+  log('Alarm reset by user.');
+});
+
+function playAlarmSound(){
+  try{
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = 'sawtooth';
+    o.frequency.value = 880;
+    g.gain.value = 0.05;
+    o.connect(g); g.connect(ac.destination);
+    o.start();
+    setTimeout(()=>{ o.stop(); ac.close(); },800);
+  }catch(e){}
+}
+
+// SMS sending (placeholder) - configure CircuitDigest endpoint + key
+async function sendSMS(message){
+  const url = CONFIG.sendSmsUrl();
+  const key = CONFIG.sendSmsKey();
+  if(!url || !key){
+    log('SMS not sent: configure SMS endpoint & key in the sidebar.');
+    return;
+  }
+  try{
+    // Example payload - adjust to CircuitDigest API contract.
+    const payload = {
+      api_key: key,
+      to: "+911234567890",      // conductor number - CHANGE THIS
+      message: message
+    };
+    const resp = await fetch(url, {
+      method:'POST',headers: {'Content-Type':'application/json'},body: JSON.stringify(payload)
+    });
+    const j = await resp.json();
+    log('SMS API response: ' + JSON.stringify(j));
+  }catch(e){
+    log('SMS send error: ' + e.message);
+  }
+}
+
+// Sensor fetch loop (polling). ESP8266 should POST latest sensor values to the endpoint.
+async function pollSensors(){
+  if(simulateSensors){
+    const s = {
+      temp: 41 + Math.random()*4,
+      humi: 75 + Math.random()*10,
+      co2: 900 + Math.round(Math.random()*600),
+      flame: Math.random() > 0.98,
+      laserTrip: Math.random() > 0.995
+    };
+    handleSensorUpdate(s);
+    setTimeout(pollSensors, 1000);
+    return;
+  }
+
+  const url = CONFIG.sensorEndpoint();
+  if(!url){
+    backendStatus.innerText = 'no endpoint';
+    backendDot.className = 'dot fail';
+    setTimeout(pollSensors, 2000);
+    return;
+  }
+
+  try{
+    const res = await fetch(url + '?_ts=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    backendStatus.innerText = 'online';
+    backendDot.className = 'dot ok';
+    handleSensorUpdate(data);
+  }catch(e){
+    backendStatus.innerText = 'error';
+    backendDot.className = 'dot warn';
+    log('Sensor fetch error: ' + e.message);
+  } finally{
+    setTimeout(pollSensors, 1500);
+  }
+}
+
+// Handle incoming sensor update JSON
+function handleSensorUpdate(data){
+  // expected fields: temp,humi,co2,flame,laserTrip
+  document.getElementById('temp').innerText = (data.temp===undefined ? '--' : data.temp.toFixed(1) + ' °C');
+  document.getElementById('humi').innerText = (data.humi===undefined ? '--' : data.humi.toFixed(0) + ' %');
+  document.getElementById('co2').innerText = (data.co2===undefined ? '--' : data.co2);
+  document.getElementById('flame').innerText = (data.flame ? 'YES' : 'NO');
+  document.getElementById('laser').innerText = (data.laserTrip ? 'BREACH' : 'OK');
+
+  // check alert conditions:
+  let alerted = false;
+  if(data.humi !== undefined && data.humi >= CONFIG.alertConditions.humidityPct){
+    triggerAlarm('High humidity: ' + data.humi + '% (>= ' + CONFIG.alertConditions.humidityPct + '%)');
+    alerted = true;
+  }
+  if(data.temp !== undefined && data.temp >= CONFIG.alertConditions.tempDegC){
+    triggerAlarm('High temperature: ' + data.temp.toFixed(1) + '°C (>= ' + CONFIG.alertConditions.tempDegC + '°C)');
+    alerted = true;
+  }
+  if(data.co2 !== undefined && data.co2 >= CONFIG.alertConditions.co2Raw){
+    triggerAlarm('High CO₂/smoke reading: ' + data.co2);
+    alerted = true;
+  }
+  if(data.flame){
+    triggerAlarm('Flame detected!');
+    alerted = true;
+  }
+  if(data.laserTrip){
+    triggerAlarm('Laser security breach (perimeter)!');
+    alerted = true;
+  }
+
+  // If condition requires opening valves (oxygen release) — example rule: co2 high and temp/humi high
+  if(data.co2 >= CONFIG.alertConditions.co2Raw && data.temp >= CONFIG.alertConditions.tempDegC){
+    // send open valves command to backend
+    sendControlCommand({action:'open_valves', valves:4});
+  }
+}
+
+// Control endpoint
+async function sendControlCommand(payload){
+  const url = CONFIG.controlEndpoint();
+  if(!url){
+    log('Control not sent: no control endpoint configured.');
+    return;
+  }
+  try{
+    const res = await fetch(url, {
+      method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const j = await res.json();
+    log('Control response: ' + JSON.stringify(j));
+  }catch(e){
+    log('Control send error: ' + e.message);
+  }
+}
+
+document.getElementById('openValvesBtn').addEventListener('click', ()=>{
+  sendControlCommand({action:'open_valves', valves:4});
+  log('Manual: open_valves command sent.');
+});
+
+// simulate toggle
+document.getElementById('simulateBtn').addEventListener('click', ()=>{
+  simulateSensors = !simulateSensors;
+  document.getElementById('simulateBtn').innerText = simulateSensors ? 'Simulate: ON' : 'Toggle Simulate Sensors';
+  log('Sensor simulation ' + (simulateSensors ? 'enabled' : 'disabled'));
+});
+
+// quick load model automatically in background
+loadModel();
+pollSensors();
+
+</script>
+
+</body>
+</html>
+
